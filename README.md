@@ -1,98 +1,247 @@
 <p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
+  <img src="assets/carmentis.svg" width="160" alt="Carmentis logo" />
 </p>
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+# Carmentis Relay
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+A lightweight signaling and message-relay server that brokers secure, ephemeral
+peer-to-peer sessions between two parties: an **initiator** and a **joiner**.
 
-## Description
+The relay is built with [NestJS](https://nestjs.com/) and uses
+[Socket.IO](https://socket.io/) for real-time, bidirectional communication. It
+acts purely as a message conduit — it pairs two clients into a session and
+forwards messages between them without inspecting or persisting their content.
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## How it works
 
-## Project setup
+A session connects exactly two peers and follows a simple lifecycle:
 
-```bash
-$ pnpm install
+1. A client calls the REST endpoint `POST /session/create` to obtain a unique
+   `sessionId`.
+2. The **initiator** opens a WebSocket connection and emits `init` with the
+   `sessionId`. The relay marks the session as initialized.
+3. The **joiner** opens a WebSocket connection and emits `join` with the same
+   `sessionId`. Once both peers are connected, the relay emits `session-ready`
+   to both.
+4. Either peer can now emit `message` events; the relay forwards each message to
+   the other peer.
+5. When either peer disconnects, the relay notifies the remaining peer with
+   `peer-disconnected`, disconnects it, and deletes the session.
+
+Sessions are held in memory only. They are created on demand and destroyed as
+soon as a peer leaves — nothing is written to disk or to a database.
+
+```
+  Initiator                Relay                  Joiner
+     │                       │                       │
+     │  POST /session/create │                       │
+     │──────────────────────▶│                       │
+     │   { sessionId }       │                       │
+     │◀──────────────────────│                       │
+     │                       │                       │
+     │  emit "init"          │                       │
+     │──────────────────────▶│                       │
+     │  "initialized"        │                       │
+     │◀──────────────────────│                       │
+     │                       │       emit "join"     │
+     │                       │◀──────────────────────│
+     │                       │       "joined"        │
+     │                       │──────────────────────▶│
+     │  "session-ready"      │      "session-ready"  │
+     │◀──────────────────────│──────────────────────▶│
+     │                       │                       │
+     │  emit "message"       │                       │
+     │──────────────────────▶│       "message"       │
+     │                       │──────────────────────▶│
+     │                       │                       │
 ```
 
-## Compile and run the project
+## API reference
+
+### REST
+
+| Method | Path              | Description                                     |
+| ------ | ----------------- | ----------------------------------------------- |
+| `GET`  | `/`               | Health check. Returns `Hello World!`.           |
+| `POST` | `/session/create` | Creates a new session. Returns `{ sessionId }`. |
+
+### WebSocket (Socket.IO)
+
+The Socket.IO server is exposed on the same port as the HTTP server.
+
+**Events emitted by the client:**
+
+| Event     | Payload                 | Description                                     |
+| --------- | ----------------------- | ----------------------------------------------- |
+| `init`    | `{ sessionId: string }` | Register as the session initiator.              |
+| `join`    | `{ sessionId: string }` | Register as the session joiner.                 |
+| `message` | any                     | Forward an arbitrary payload to the other peer. |
+
+**Events emitted by the server:**
+
+| Event               | Payload                 | Description                                          |
+| ------------------- | ----------------------- | ---------------------------------------------------- |
+| `initialized`       | `{ sessionId: string }` | The initiator was registered.                        |
+| `joined`            | `{ sessionId: string }` | The joiner was registered.                           |
+| `session-ready`     | —                       | Both peers are connected; messaging may begin.       |
+| `message`           | any                     | A payload forwarded from the other peer.             |
+| `peer-disconnected` | —                       | The other peer left; this connection will be closed. |
+| `error`             | `{ message: string }`   | The request was rejected (see reasons below).        |
+
+**Error conditions** (the connection is closed after an `error` is emitted):
+
+- `Session not found` — the `sessionId` is unknown.
+- `Session already initialized` — an initiator already claimed the session.
+- `Session not yet initialized` — a joiner connected before the initiator.
+- `Session already has a joiner` — the session is full.
+
+## Requirements
+
+- [Node.js](https://nodejs.org/) 20 or later
+- [pnpm](https://pnpm.io/) (the project ships a `pnpm-lock.yaml`)
+
+Install pnpm if you don't have it:
 
 ```bash
-# development
-$ pnpm run start
-
-# watch mode
-$ pnpm run start:dev
-
-# production mode
-$ pnpm run start:prod
+npm install -g pnpm
 ```
 
-## Run tests
+## Local deployment
+
+### 1. Install dependencies
 
 ```bash
-# unit tests
-$ pnpm run test
-
-# e2e tests
-$ pnpm run test:e2e
-
-# test coverage
-$ pnpm run test:cov
+pnpm install
 ```
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+### 2. Run the server
 
 ```bash
-$ pnpm install -g @nestjs/mau
-$ mau deploy
+# Development (rebuilds on change)
+pnpm run start:dev
+
+# Plain start
+pnpm run start
+
+# Production (runs the compiled output in dist/)
+pnpm run build
+pnpm run start:prod
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+The server listens on port **3000** by default. Override it with the `PORT`
+environment variable:
 
-## Resources
+```bash
+PORT=8080 pnpm run start
+```
 
-Check out a few resources that may come in handy when working with NestJS:
+### 3. Verify it's running
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+```bash
+curl http://localhost:3000/
+# -> Hello World!
 
-## Support
+curl -X POST http://localhost:3000/session/create
+# -> {"sessionId":"<32-hex-character id>"}
+```
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+## Docker deployment
 
-## Stay in touch
+### Option A — pull the pre-built image
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+A multi-stage image is published to the GitHub Container Registry by CI on every
+push to the default branch and on version tags.
+
+```bash
+docker pull ghcr.io/carmentis/relay:latest
+
+docker run -p 3000:3000 ghcr.io/carmentis/relay:latest
+```
+
+Available tags include `latest`, the branch name, version tags (e.g. `1.2.3`,
+`1.2`, `1`), and commit-SHA tags. See the
+[GitHub Actions workflow](.github/workflows) for the full tagging strategy.
+
+### Option B — build the image locally
+
+```bash
+docker build -t carmentis-relay .
+
+docker run -p 3000:3000 carmentis-relay
+```
+
+The `Dockerfile` uses a two-stage build: the first stage compiles the
+TypeScript sources, and the second stage installs production dependencies only
+and runs `node dist/main.js`. `NODE_ENV` is set to `production` in the final
+image.
+
+### Configuration
+
+| Variable   | Default | Description                       |
+| ---------- | ------- | --------------------------------- |
+| `PORT`     | `3000`  | Port the server listens on.       |
+| `NODE_ENV` | —       | Set to `production` in the image. |
+
+To change the port at runtime:
+
+```bash
+docker run -e PORT=8080 -p 8080:8080 carmentis-relay
+```
+
+## Development
+
+```bash
+# Run the linter (auto-fixes where possible)
+pnpm run lint
+
+# Format the codebase with Prettier
+pnpm run format
+```
+
+## Testing
+
+```bash
+# Unit tests
+pnpm run test
+
+# Watch mode
+pnpm run test:watch
+
+# Coverage report
+pnpm run test:cov
+
+# End-to-end tests
+pnpm run test:e2e
+```
+
+## Project structure
+
+```
+src/
+├── main.ts                     # Application bootstrap (CORS + listen)
+├── app.module.ts               # Root module
+├── app.controller.ts           # Health-check endpoint
+├── app.service.ts
+└── session/
+    ├── session.module.ts
+    ├── session.controller.ts   # POST /session/create
+    ├── session.service.ts      # In-memory session store
+    └── session.gateway.ts      # Socket.IO gateway (init/join/message)
+```
+
+## Notes & limitations
+
+- **In-memory state.** Sessions live only in the process memory of a single
+  instance. The relay is therefore not horizontally scalable as-is; running
+  multiple replicas requires a shared session store or sticky routing so that
+  both peers of a session land on the same instance.
+- **CORS is fully open.** Both the HTTP layer (`src/main.ts`) and the Socket.IO
+  gateway accept any origin (`*`). Restrict this before exposing the relay
+  publicly.
+- **Opaque relaying.** The server forwards `message` payloads verbatim and does
+  not read or store their content; end-to-end confidentiality is the
+  responsibility of the peers.
 
 ## License
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+UNLICENSED — see `package.json`.
