@@ -5,6 +5,7 @@ import {
   OnGatewayConnection,
   OnGatewayDisconnect,
 } from '@nestjs/websockets';
+import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { SessionService } from './session.service';
 
@@ -24,22 +25,24 @@ export class SessionGateway implements OnGatewayConnection, OnGatewayDisconnect 
   server: Server;
 
   private clients = new Map<string, SessionClient>(); // socketId -> SessionClient
+  private readonly logger = new Logger(SessionGateway.name);
 
   constructor(private readonly sessionService: SessionService) {}
 
   handleConnection(client: Socket) {
-    console.log(`Client connected: ${client.id}`);
+    this.logger.log(`Client connected [socketId=${client.id}]`);
   }
 
   handleDisconnect(client: Socket) {
-    console.log(`Client disconnected: ${client.id}`);
     const sessionClient = this.clients.get(client.id);
     if (sessionClient) {
-      const { sessionId } = sessionClient;
+      const { sessionId, role } = sessionClient;
+      this.logger.log(`Client disconnected [socketId=${client.id}, sessionId=${sessionId}, role=${role}]`);
 
       // Notify the other client in the session
       const otherClient = this.findOtherClient(sessionClient);
       if (otherClient) {
+        this.logger.debug(`Notifying peer of disconnection [peerId=${otherClient.socket.id}]`);
         otherClient.socket.emit('peer-disconnected');
         otherClient.socket.disconnect();
       }
@@ -49,21 +52,28 @@ export class SessionGateway implements OnGatewayConnection, OnGatewayDisconnect 
 
       // Delete the session when either client disconnects
       this.sessionService.deleteSession(sessionId);
+      this.logger.log(`Session cleaned up [sessionId=${sessionId}]`);
+    } else {
+      this.logger.debug(`Client disconnected without active session [socketId=${client.id}]`);
     }
   }
 
   @SubscribeMessage('init')
   handleInit(client: Socket, payload: { sessionId: string }) {
     const { sessionId } = payload;
+    this.logger.debug(`Init message received [socketId=${client.id}, sessionId=${sessionId}]`);
+
     const session = this.sessionService.getSession(sessionId);
 
     if (!session) {
+      this.logger.warn(`Init failed: session not found [socketId=${client.id}, sessionId=${sessionId}]`);
       client.emit('error', { message: 'Session not found' });
       client.disconnect();
       return;
     }
 
     if (session.initiatorConnected) {
+      this.logger.warn(`Init failed: session already initialized [socketId=${client.id}, sessionId=${sessionId}]`);
       client.emit('error', { message: 'Session already initialized' });
       client.disconnect();
       return;
@@ -77,27 +87,33 @@ export class SessionGateway implements OnGatewayConnection, OnGatewayDisconnect 
     });
 
     this.sessionService.setInitiatorConnected(sessionId);
+    this.logger.log(`Session initialized by client [socketId=${client.id}, sessionId=${sessionId}]`);
     client.emit('initialized', { sessionId });
   }
 
   @SubscribeMessage('join')
   handleJoin(client: Socket, payload: { sessionId: string }) {
     const { sessionId } = payload;
+    this.logger.debug(`Join message received [socketId=${client.id}, sessionId=${sessionId}]`);
+
     const session = this.sessionService.getSession(sessionId);
 
     if (!session) {
+      this.logger.warn(`Join failed: session not found [socketId=${client.id}, sessionId=${sessionId}]`);
       client.emit('error', { message: 'Session not found' });
       client.disconnect();
       return;
     }
 
     if (!session.initiatorConnected) {
+      this.logger.warn(`Join failed: session not yet initialized [socketId=${client.id}, sessionId=${sessionId}]`);
       client.emit('error', { message: 'Session not yet initialized' });
       client.disconnect();
       return;
     }
 
     if (session.joinerConnected) {
+      this.logger.warn(`Join failed: session already has a joiner [socketId=${client.id}, sessionId=${sessionId}]`);
       client.emit('error', { message: 'Session already has a joiner' });
       client.disconnect();
       return;
@@ -111,10 +127,12 @@ export class SessionGateway implements OnGatewayConnection, OnGatewayDisconnect 
     });
 
     this.sessionService.setJoinerConnected(sessionId);
+    this.logger.log(`Client joined session [socketId=${client.id}, sessionId=${sessionId}]`);
     client.emit('joined', { sessionId });
 
     // Check if session is ready (both clients connected)
     if (this.sessionService.isSessionReady(sessionId)) {
+      this.logger.log(`Session ready: both clients connected [sessionId=${sessionId}]`);
       // Notify both clients that the session is ready
       const initiator = this.findInitiator(sessionId);
       if (initiator) {
@@ -128,13 +146,17 @@ export class SessionGateway implements OnGatewayConnection, OnGatewayDisconnect 
   handleMessage(client: Socket, payload: any) {
     const sessionClient = this.clients.get(client.id);
     if (!sessionClient) {
+      this.logger.warn(`Message from unknown client [socketId=${client.id}]`);
       return;
     }
 
     // Forward message to the other client in the session
     const otherClient = this.findOtherClient(sessionClient);
     if (otherClient) {
+      this.logger.debug(`Message forwarded [from=${client.id}, to=${otherClient.socket.id}, sessionId=${sessionClient.sessionId}]`);
       otherClient.socket.emit('message', payload);
+    } else {
+      this.logger.warn(`Message forwarding failed: peer not found [socketId=${client.id}, sessionId=${sessionClient.sessionId}]`);
     }
   }
 
